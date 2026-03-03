@@ -1,0 +1,71 @@
+@startuml
+' Описание последовательности для кеширования дашборда MES
+
+actor Operator as op
+participant "MES API" as api
+participant "Redis Cache" as redis
+participant "PostgreSQL (MES db)" as db
+
+title "MES (кеширование Cache-Aside)"
+
+== Сценарий 1: Оператор открывает дашборд и получает промах кэша ==
+
+op -> api: GET /dashboard?status=in_progress&page=1
+activate api
+
+api -> redis: GET dashboard:status=in_progress:page=1
+activate redis
+redis --> api: null (промах)
+deactivate redis
+
+note right of api: Данных в кеше нет,\nвыполняем запрос к БД
+
+api -> db: SELECT * FROM orders \nWHERE status='in_progress' \nORDER BY created_at DESC \nLIMIT 20 OFFSET 0
+activate db
+db --> api: Список заказов (20 шт.)
+deactivate db
+
+api -> redis: SET dashboard:status=in_progress:page=1 \nTTL=300 (5 минут)
+activate redis
+redis --> api: OK
+deactivate redis
+
+api --> op: JSON со списком заказов
+deactivate api
+
+== Сценарий 2: Оператор обновляет статус заказа (Write + Invalidate) ==
+
+op -> api: POST /order/{order_id}/status \nstatus=MANUFACTURING_STARTED
+activate api
+
+api -> db: UPDATE orders \nSET status='MANUFACTURING_STARTED' \nWHERE id={order_id}
+activate db
+db --> api: OK (1 row updated)
+deactivate db
+
+note right of api: Данные изменены,\nинвалидируем кеш дашборда
+
+api -> redis: DEL dashboard:*
+activate redis
+redis --> api: OK (keys removed)
+deactivate redis
+
+api --> op: 200 OK (статус обновлен)
+deactivate api
+
+== Сценарий 3: Оператор снова открывает дашборд (Cache Hit) ==
+
+op -> api: GET /dashboard?status=in_progress&page=1
+activate api
+
+api -> redis: GET dashboard:status=in_progress:page=1
+activate redis
+redis --> api: Список заказов (Cache Hit)
+deactivate redis
+
+note right of api: Данные есть в кеше,\nБД не трогаем
+
+api --> op: JSON со списком заказов (из кеша)
+deactivate api
+
+@enduml
